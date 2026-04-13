@@ -18,6 +18,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.get("/")
+def inicio():
+    return {
+        "status": "online",
+        "msg": "Servidor Credycel v.1 (Seguridad Activa)",
+        "docs": "/docs"
+    }
+
 # CONEXIÓN MONGODB
 MONGO_URL = "mongodb+srv://erojas21749_db_user:310y41b3rT0@cluster0.saivmal.mongodb.net/credycel_db?retryWrites=true&w=majority"
 client = AsyncIOMotorClient(MONGO_URL)
