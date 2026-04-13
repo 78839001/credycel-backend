@@ -73,6 +73,15 @@ async def consultar_dni(dni: str):
         except:
             raise HTTPException(status_code=500, detail="Error de conexión con RENIEC")
 
+# --- NUEVO: VERIFICAR DUPLICADOS EN LA NUBE ---
+@app.get("/verificar-visita/{dni}/{fecha}")
+async def verificar_visita(dni: str, fecha: str):
+    # Busca en MongoDB si ya hay una visita con ese DNI en esa fecha
+    existe = await db.visitas.find_one({"dni": dni, "fecha": fecha})
+    if existe:
+        return {"existe": True}
+    return {"existe": False}
+
 @app.post("/sincronizar")
 async def sincronizar(visita: Visita):
     try:
