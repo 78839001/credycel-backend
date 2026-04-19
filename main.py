@@ -95,14 +95,32 @@ async def verificar_visita(dni: str, fecha: str, user=Depends(obtener_usuario_ac
 @app.post("/sincronizar")
 async def sincronizar(visita: Visita, user=Depends(obtener_usuario_actual)):
     try:
+        # 1. EL JUEZ FINAL: Revisamos si ya existe en la base de datos
+        existe = await db.visitas.find_one({
+            "dni": visita.dni, 
+            "fecha": visita.fecha
+        })
+        
+        if existe:
+            # Si existe, el servidor responde con un error 400 (Bad Request)
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Error: El DNI {visita.dni} ya fue registrado el día {visita.fecha}"
+            )
+
+        # 2. Si no existe, procedemos a guardar
         data = visita.dict()
-        data["promotor"] = user["sub"] # Tomamos el promotor real del Token
+        data["promotor"] = user["sub"] 
         data["registro_servidor"] = datetime.datetime.now()
+        
         await db.visitas.insert_one(data)
-        return {"status": "ok"}
+        return {"status": "ok", "message": "Visita sincronizada correctamente"}
+
+    except HTTPException as he:
+        raise he
     except Exception as e:
-        print(f"Error DB: {e}")
-        raise HTTPException(status_code=500, detail="Error al guardar en nube")
+        print(f"Error crítico en DB: {e}")
+        raise HTTPException(status_code=500, detail="Error interno al procesar la visita")
 
 @app.get("/reporte/{fecha}")
 async def reporte(fecha: str, user=Depends(obtener_usuario_actual)):
