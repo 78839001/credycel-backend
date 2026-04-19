@@ -1,27 +1,33 @@
-from fastapi import FastAPI, HTTPException
+import os
+import jwt
+import datetime
+from typing import Optional
+from fastapi import FastAPI, HTTPException, Depends, status
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from passlib.context import CryptContext
-import datetime
-import httpx
-from typing import Optional
 
 app = FastAPI()
+security = HTTPBearer()
 
-# Configuración de seguridad (Hasheo de claves)
+# --- CONFIGURACIÓN DE SEGURIDAD (Variables de Entorno) ---
+# En Render, debes agregar estas 3 variables en 'Environment'
+MONGO_URL = os.getenv("MONGO_URL", "mongodb+srv://user:pass@cluster...")
+TOKEN_APISPERU = os.getenv("TOKEN_APISPERU", "tu_token_aqui")
+SECRET_KEY = os.getenv("SECRET_KEY", "una_clave_secreta_muy_larga_y_segura_2026")
+ALGORITHM = "HS256"
+
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
+# CORS Protegido: Cambia '*' por la URL de tu app en producción (ej. Netlify/GitHub Pages)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"], 
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# --- CONFIGURACIÓN DE CONEXIONES ---
-MONGO_URL = "mongodb+srv://erojas21749_db_user:310y41b3rT0@cluster0.saivmal.mongodb.net/credycel_db?retryWrites=true&w=majority"
-TOKEN_APISPERU = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJlbWFpbCI6ImVyb2phczIxNzQ5QG91dGxvb2suY29tIn0.E10BDz6gzUn6gjX781q7EFsKYeZF22rPWy6o_B2a-Kk"
 
 client = AsyncIOMotorClient(MONGO_URL)
 db = client.credycel_db
@@ -47,68 +53,81 @@ class Visita(BaseModel):
     promotor: str
     foto_base64: Optional[str] = None
 
-# --- ENDPOINTS ---
+# --- FUNCIONES DE SEGURIDAD ---
+def crear_token(data: dict):
+    payload = data.copy()
+    expire = datetime.datetime.utcnow() + datetime.timedelta(days=1)
+    payload.update({"exp": expire})
+    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
 
-@app.get("/")
-def inicio():
-    return {"status": "online", "msg": "Credycel Backend v.2.1 Ready"}
+def obtener_usuario_actual(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    try:
+        payload = jwt.decode(credentials.credentials, SECRET_KEY, algorithms=[ALGORITHM])
+        return payload
+    except:
+        raise HTTPException(status_code=401, detail="Token inválido o expirado")
+
+# --- ENDPOINTS ---
 
 @app.post("/login")
 async def login(req: LoginRequest):
     user_db = await db.usuarios.find_one({"username": req.username})
     if not user_db or not pwd_context.verify(req.password, user_db["password"]):
-        raise HTTPException(status_code=401, detail="Usuario o clave incorrectos")
-    return {"status": "ok", "user": user_db["username"], "role": user_db["role"]}
+        raise HTTPException(status_code=401, detail="Acceso denegado")
+    
+    token = crear_token({"sub": user_db["username"], "role": user_db["role"]})
+    return {"status": "ok", "token": token, "user": user_db["username"], "role": user_db["role"]}
 
 @app.get("/consultar-dni/{dni}")
-async def consultar_dni(dni: str):
-    if len(dni) != 8:
-        raise HTTPException(status_code=400, detail="DNI inválido")
-    
+async def consultar_dni(dni: str, user=Depends(obtener_usuario_actual)):
     url = f"https://dniruc.apisperu.com/api/v1/dni/{dni}?token={TOKEN_APISPERU}"
     async with httpx.AsyncClient() as client_http:
         try:
-            response = await client_http.get(url, timeout=10.0)
-            return response.json()
+            res = await client_http.get(url, timeout=10.0)
+            return res.json()
         except:
-            raise HTTPException(status_code=500, detail="Error de conexión con RENIEC")
+            raise HTTPException(status_code=500, detail="Error DNI")
 
-# --- NUEVO: VERIFICAR DUPLICADOS EN LA NUBE ---
 @app.get("/verificar-visita/{dni}/{fecha}")
-async def verificar_visita(dni: str, fecha: str):
-    # Busca en MongoDB si ya hay una visita con ese DNI en esa fecha
+async def verificar_visita(dni: str, fecha: str, user=Depends(obtener_usuario_actual)):
     existe = await db.visitas.find_one({"dni": dni, "fecha": fecha})
-    if existe:
-        return {"existe": True}
-    return {"existe": False}
+    return {"existe": bool(existe)}
 
 @app.post("/sincronizar")
-async def sincronizar(visita: Visita):
-    try:
-        data = visita.dict()
-        data["registro_servidor"] = datetime.datetime.now()
-        await db.visitas.insert_one(data)
-        return {"status": "ok"}
-    except Exception as e:
-        print(f"Error en DB: {e}")
-        raise HTTPException(status_code=500, detail="Error al guardar registro")
+async def sincronizar(visita: Visita, user=Depends(obtener_usuario_actual)):
+    data = visita.dict()
+    # Forzamos que el promotor sea el usuario del token (Seguridad Nivel 4)
+    data["promotor"] = user["sub"] 
+    data["registro_servidor"] = datetime.datetime.now()
+    await db.visitas.insert_one(data)
+    return {"status": "ok"}
 
 @app.get("/reporte/{fecha}")
-async def reporte(fecha: str):
-    cursor = db.visitas.find({"fecha": fecha})
+async def reporte(fecha: str, user=Depends(obtener_usuario_actual)):
+    # Solo el supervisor puede ver reportes globales
+    filtro = {"fecha": fecha}
+    if user["role"] != "supervisor":
+        filtro["promotor"] = user["sub"]
+        
+    cursor = db.visitas.find(filtro)
     visitas = await cursor.to_list(length=1000)
     for v in visitas: v["_id"] = str(v["_id"])
     return visitas
 
 @app.post("/crear-usuario")
-async def crear_usuario(user: User):
-    existe = await db.usuarios.find_one({"username": user.username})
-    if existe: raise HTTPException(status_code=400, detail="El usuario ya existe")
+async def crear_usuario(nuevo_user: User, admin=Depends(obtener_usuario_actual)):
+    # Solo un supervisor puede crear otros usuarios
+    if admin["role"] != "supervisor":
+        raise HTTPException(status_code=403, detail="No tienes permisos")
+        
+    existe = await db.usuarios.find_one({"username": nuevo_user.username})
+    if existe: raise HTTPException(status_code=400, detail="Ya existe")
+    
     user_dict = {
-        "username": user.username,
-        "password": pwd_context.hash(user.password),
-        "role": user.role,
+        "username": nuevo_user.username,
+        "password": pwd_context.hash(nuevo_user.password),
+        "role": nuevo_user.role,
         "fecha_creacion": datetime.datetime.now()
     }
     await db.usuarios.insert_one(user_dict)
-    return {"msg": "Usuario creado con éxito"}
+    return {"msg": "Usuario creado"}
