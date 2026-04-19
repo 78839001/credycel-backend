@@ -1,7 +1,7 @@
 import os
 import jwt
 import datetime
-from httpx import AsyncClient # Importación blindada contra errores
+from httpx import AsyncClient
 from typing import Optional
 from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -13,7 +13,7 @@ from passlib.context import CryptContext
 app = FastAPI()
 security = HTTPBearer()
 
-# --- CONFIGURACIÓN DESDE RENDER (Variables de Entorno) ---
+# --- CONFIGURACIÓN SEGURA (Usa las variables de Render) ---
 MONGO_URL = os.getenv("MONGO_URL")
 TOKEN_APISPERU = os.getenv("TOKEN_APISPERU")
 SECRET_KEY = os.getenv("SECRET_KEY")
@@ -79,18 +79,13 @@ async def login(req: LoginRequest):
 
 @app.get("/consultar-dni/{dni}")
 async def consultar_dni(dni: str, user=Depends(obtener_usuario_actual)):
-    if len(dni) != 8:
-        raise HTTPException(status_code=400, detail="DNI debe tener 8 cifras")
-    
     url = f"https://dniruc.apisperu.com/api/v1/dni/{dni}?token={TOKEN_APISPERU}"
-    
     async with AsyncClient() as client_http:
         try:
             response = await client_http.get(url, timeout=15.0)
             return response.json()
-        except Exception as e:
-            print(f"Error de red: {e}")
-            raise HTTPException(status_code=500, detail="Error de comunicación con RENIEC")
+        except:
+            raise HTTPException(status_code=500, detail="Error de conexión con RENIEC")
 
 @app.get("/verificar-visita/{dni}/{fecha}")
 async def verificar_visita(dni: str, fecha: str, user=Depends(obtener_usuario_actual)):
@@ -101,7 +96,7 @@ async def verificar_visita(dni: str, fecha: str, user=Depends(obtener_usuario_ac
 async def sincronizar(visita: Visita, user=Depends(obtener_usuario_actual)):
     try:
         data = visita.dict()
-        data["promotor"] = user["sub"] # Tomamos el nombre desde el Token
+        data["promotor"] = user["sub"] # Tomamos el promotor real del Token
         data["registro_servidor"] = datetime.datetime.now()
         await db.visitas.insert_one(data)
         return {"status": "ok"}
@@ -112,6 +107,7 @@ async def sincronizar(visita: Visita, user=Depends(obtener_usuario_actual)):
 @app.get("/reporte/{fecha}")
 async def reporte(fecha: str, user=Depends(obtener_usuario_actual)):
     filtro = {"fecha": fecha}
+    # Si no es supervisor, solo ve sus propias visitas
     if user["role"] != "supervisor":
         filtro["promotor"] = user["sub"]
         
